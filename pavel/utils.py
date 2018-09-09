@@ -1,21 +1,30 @@
-#run nltk_download.py before running this for first time
-
+import json
+from collections import __init__
 
 import pandas as pd
-import nltk as nl
-from nltk.tokenize import sent_tokenize
-from nltk.tokenize import word_tokenize
 from nltk.corpus import stopwords
+from sklearn.feature_extraction.text import TfidfVectorizer
 
-english_stops = set(stopwords.words('english'))
+MIN_WORD_LEN = 3
 
-df = pd.read_csv("C:\\tmp\\dabble\\movies_metadata.csv")
+custom_stopwords = set([',', '.', "'s", ')', '(', '``', "''", '’'])
+
+stopwords = set(stopwords.words('english')).union(custom_stopwords)
 
 
-# Uses this dataset https://www.kaggle.com/rounakbanik/the-movies-dataset
+def genres_to_array(keywords, pref="gen_"):
+    return [pref + x['name'] for x in keywords]
 
 
-def column_to_set(column):
+def lowercase(s):
+    return s.lower()
+
+
+def rectify_json(s):
+    return json.loads(s.replace("'", '"'))
+
+
+def column_to_set(df, column):
     all_genres = set()
     for c in df[column]:
         split = c.split(",")
@@ -24,13 +33,10 @@ def column_to_set(column):
     return all_genres
 
 
-word_counts = {}
-
-
-def count_words(words):
+def count_words(words, word_counts):
     for w in words:
         w = w.lower()
-        if (w in english_stops):
+        if (w in stopwords or len(w) < MIN_WORD_LEN):
             continue
         if (not w in word_counts):
             word_counts[w] = 1
@@ -38,18 +44,40 @@ def count_words(words):
             word_counts[w] = word_counts[w] + 1
 
 
-for overview in df["overview"]:
-    try:
-        if overview is not None:
-            sentences = sent_tokenize(overview);
-            for sentence in sentences:
-                words = word_tokenize(sentence)
-                count_words(words)
-                # print(words)
-        # break
-    except TypeError:
-        print("Cannot tokenize:", overview)
+class FeatureVectorizer(object):
+    def __init__(self, column) -> None:
+        super().__init__()
 
-sorted_d = sorted(((value, key) for (key, value) in word_counts.items()), reverse=True)
+    def vectorize(self, column):
+        pass
 
-print(sorted_d[:20])
+
+class TFIDFVectorizer(FeatureVectorizer):
+    def __init__(self, column) -> None:
+        super().__init__(column)
+        self.tfid = TfidfVectorizer(stop_words="english", max_features=5000)
+        self.tfid.fit(column)
+
+    def vectorize(self, column):
+        return self.tfid.transform(column)
+
+
+def detectClasses(df, column=None, prefix=None):
+    tmp = df[column].apply(genres_to_array)
+    data3 = tmp.apply(collections.Counter)
+    tmpDF = pd.DataFrame.from_records(data3).fillna(value=0)
+    return pd.concat([df, tmpDF], axis=1)
+
+
+def pre_process(df):
+    df['genres'] = df['genres'].apply(rectify_json)
+    df["overview"] = df["overview"].fillna(value="")
+    df['overview'] = df['overview'].apply(lowercase)
+
+
+def extract_classes(data, prefx, classes):
+    if (classes is not None):
+        cols = [prefx + x for x in classes]
+    else:
+        cols = [col for col in data.columns if col.startswith(prefx)]
+    return cols, data.as_matrix(columns=cols)
