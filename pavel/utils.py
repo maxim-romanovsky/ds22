@@ -10,6 +10,9 @@ from nltk.tokenize import sent_tokenize
 from nltk.tokenize import word_tokenize
 import pickle as pic
 import os
+import gensim
+
+from nltk.stem.porter import *
 
 MIN_WORD_LEN = 3
 
@@ -50,23 +53,51 @@ def count_words(words, word_counts):
             word_counts[w] = word_counts[w] + 1
 
 
-def token_gen(strng):
+def count_words_in_column(column):
+    result = {}
+
+    for overview in column:
+        try:
+            if overview is not None:
+                sentences = sent_tokenize(overview);
+                for sentence in sentences:
+                    words = word_tokenize(sentence)
+                    count_words(words, result)
+                    # print(words)
+            # break
+        except TypeError:
+            print("Cannot tokenize:", overview)
+    return result
+
+
+def token_gen(strng, transformer=None):
     sentences = sent_tokenize(strng)
     for sentence in sentences:
         for word in word_tokenize(sentence):
             if not (word in stopwords or len(word) < MIN_WORD_LEN):
-                yield word
+                if transformer is not None:
+                    yield transformer(word)
+                else:
+                    yield word
         yield "EOS"
 
 
+def tokenize(doc, stemmer=None):
+    return [x for x in token_gen(doc, stemmer)]
+
+
 class FeatureVectorizer(object):
-    def __init__(self) -> None:
+    def __init__(self, token_transformer=None) -> None:
         super().__init__()
+        self.token_transformer = token_transformer
 
     def vectorize(self, column):
         pass
 
     def train(self, column):
+        pass
+
+    def getVocabulary(self):
         pass
 
 
@@ -81,10 +112,30 @@ def count_occurences(word, list):
 keywords = set(["EOS", "UNK"])
 
 
+class GensimVectorizer(FeatureVectorizer):
+
+    def __init__(self, model_file, maxLen=300, token_transformer=None) -> None:
+        super().__init__(token_transformer)
+        self.maxLen = maxLen
+        self.mdl = gensim.models.KeyedVectors.load_word2vec_format(model_file, binary=True)
+
+    def vectorize(self, column):
+        result = np.full((len(column), self.maxLen, self.mdl.vector_size), 0)
+        for i, item in enumerate(column):
+            for k, token in enumerate(token_gen(item, self.token_transformer)):
+                if token in self.mdl:
+                    result[i, k] = self.mdl[token]
+
+        return result
+
+    def train(self, column):
+        pass
+
+
 class SequenceVectorizer(FeatureVectorizer):
 
-    def __init__(self, file=None, minDf=0.0, maxDf=1.0, maxLen=300) -> None:
-        super().__init__()
+    def __init__(self, file=None, minDf=0.0, maxDf=1.0, maxLen=300, token_transformer=None) -> None:
+        super().__init__(token_transformer)
         self.maxLen = maxLen
         self.maxDf = maxDf
         self.minDf = minDf
@@ -94,12 +145,17 @@ class SequenceVectorizer(FeatureVectorizer):
         result = np.full((len(column), self.maxLen), len(self.vocab))
 
         for i, item in enumerate(column):
-            for k, token in enumerate(token_gen(item)):
+            max_k = 0
+            for k, token in enumerate(token_gen(item, self.token_transformer)):
+                max_k = k
                 if token in self.vocab:
                     idx = self.vocab[token]
                 else:
                     idx = self.vocab["UNK"]
                 result[i, k] = idx
+            result[i, self.maxLen - max_k:self.maxLen] = result[i, 0:max_k]
+            result[i, 0:self.maxLen - max_k] = len(self.vocab)
+
         return result
 
     def train(self, column):
@@ -134,7 +190,7 @@ class SequenceVectorizer(FeatureVectorizer):
     def register_word_distribution(self, allwords, column):
         matr = lil_matrix((len(column), len(allwords)))
         for idx, item in enumerate(column):
-            for token in token_gen(item):
+            for token in token_gen(item, self.token_transformer):
                 matr[idx, allwords[token]] = 1
         return matr
 
@@ -142,7 +198,7 @@ class SequenceVectorizer(FeatureVectorizer):
         allwords = {}
         maxLength = 0
         for item in column:
-            for i, token in enumerate(token_gen(item)):
+            for i, token in enumerate(token_gen(item, self.token_transformer)):
                 maxLength = max(maxLength, i)
                 if not (token in allwords):
                     allwords[token] = len(allwords)
@@ -160,9 +216,10 @@ class SequenceVectorizer(FeatureVectorizer):
 
 
 class TFIDFVectorizer(FeatureVectorizer):
-    def __init__(self, mx_features=5000) -> None:
-        super().__init__()
-        self.tfid = TfidfVectorizer(stop_words="english", max_features=mx_features)
+    def __init__(self, mx_features=5000, ngram_range=(1, 1), token_transformer=None, minDf=40, maxDF=0.98) -> None:
+        super().__init__(token_transformer)
+        self.tfid = TfidfVectorizer(stop_words="english", max_features=mx_features, ngram_range=ngram_range,
+                                    min_df=minDf, max_df=maxDF, tokenizer=lambda doc: tokenize(doc, token_transformer))
 
     def vectorize(self, column):
         return self.tfid.transform(column)
@@ -170,12 +227,16 @@ class TFIDFVectorizer(FeatureVectorizer):
     def train(self, column):
         self.tfid.fit(column)
 
+    def getVocabulary(self):
+        return self.tfid.vocabulary_
+
 
 class BagOfWordsVectorizer(FeatureVectorizer):
 
-    def __init__(self, mx_features=5000, minDf=40, maxDf=0.01) -> None:
-        super().__init__()
-        self.vec = CountVectorizer(stop_words="english", max_features=mx_features, min_df=minDf, max_df=maxDf)
+    def __init__(self, mx_features=5000, minDf=40, n_gram_range=(1, 1), maxDF=0.98, token_transformer=None) -> None:
+        super().__init__(token_transformer)
+        self.vec = CountVectorizer(stop_words="english", ngram_range=n_gram_range, max_features=mx_features,
+                                   min_df=minDf, max_df=maxDF, tokenizer=lambda doc: tokenize(doc, token_transformer))
 
     def vectorize(self, column):
         return self.vec.transform(column)
@@ -183,12 +244,15 @@ class BagOfWordsVectorizer(FeatureVectorizer):
     def train(self, column):
         self.vec.fit(column)
 
+    def getVocabulary(self):
+        return self.vec.vocabulary_
+
 
 def detectClasses(df, column=None, prefix=None):
     tmp = df[column].apply(genres_to_array)
     data3 = tmp.apply(collections.Counter)
     tmpDF = pd.DataFrame.from_records(data3).fillna(value=0)
-    return pd.concat([df, tmpDF], axis=1)
+    return pd.concat([df, tmpDF], axis=1), len(tmpDF.columns)
 
 
 def pre_process(df):
@@ -205,3 +269,96 @@ def extract_classes(data, prefx, classes):
     else:
         cols = [col for col in data.columns if col.startswith(prefx)]
     return cols, data.as_matrix(columns=cols)
+
+
+def year_to_string(word):
+    yr = int(word)
+    if yr < 1700:
+        return "medieval"
+    if yr < 1920:
+        return "past"
+    if yr > 2020:
+        return "future"
+    if yr >= 2000:
+        return "millenium"
+    str_y = word[2]
+    return {
+        '2': 'twenties',
+        '3': 'thirties',
+        '4': 'forties',
+        '5': 'fifties',
+        '6': 'sixties',
+        '7': 'seventies',
+        '8': 'eighties',
+        '9': 'nineties',
+    }[str_y]
+
+
+def is_year(word):
+    try:
+        yr = int(word)
+        return True
+    except ValueError:
+        return False
+
+
+class TrainingGenerator(object):
+    def __init__(self, maxLen=300, model_file=None, synonim_file=None, stemmer=None) -> None:
+        super().__init__()
+        self.stemmer = stemmer
+        self.synonim_file = synonim_file
+        self.maxLen = maxLen
+        self.mdl = gensim.models.KeyedVectors.load(model_file)
+        self.vector_size = self.mdl.vector_size
+        if (synonim_file is not None):
+            with(open(synonim_file)) as sf:
+                self.synonyms = {line.strip().split(",")[0]: line.strip().split(",")[1] for line in sf}
+        else:
+            self.synonyms = None
+
+    def generate(self, dataFrame, text_column, Y_prefix, batch_size, Y_classes=None):
+        while True:
+            batch = dataFrame.sample(n=batch_size)
+            tmp, batch_y = extract_classes(batch, Y_prefix, Y_classes)
+
+            column = batch[text_column]
+
+            batch_x = np.full((len(column), self.maxLen, self.mdl.vector_size + 1), 0.0)
+            for i, item in enumerate(column):
+                max_k = 0;
+                for k, token in enumerate(token_gen(item, self.stemmer)):
+                    max_k = k
+                    token = self.choose_token(token)
+                    if token is not None:
+                        batch_x[i, k, 0:self.mdl.vector_size] = self.mdl[token]
+                    else:
+                        batch_x[i, k, self.mdl.vector_size] = 1.0
+                batch_x[i, self.maxLen - max_k:self.maxLen] = batch_x[i, 0:max_k]
+                batch_x[i, 0:self.maxLen - max_k] = 0.0
+
+            yield batch_x, batch_y
+
+    def hasWord(self, word):
+        return word in self.mdl
+
+    def can_convert(self, word):
+        return self.choose_token(word) in self.mdl
+
+    def generate_balanced(self, dataFrame, text_column, Y_prefix, batch_size, Y_classes):
+        pass
+
+    def choose_token(self, word):
+        if self.hasWord(word):
+            return word
+        norm = word.replace("-", "_").replace(".", "")
+        if self.hasWord(norm):
+            return norm
+        if is_year(word):
+            ystr = year_to_string(word)
+            if self.hasWord(ystr):
+                return ystr
+        if self.synonyms is not None and word in self.synonyms:
+            syn = self.synonyms[word]
+            if self.hasWord(syn):
+                return syn
+        return None
